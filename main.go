@@ -3,7 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -11,15 +10,15 @@ import (
 	"syscall"
 
 	"github.com/gorilla/mux"
+	"github.com/joho/godotenv"
+	"github.com/sirupsen/logrus"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/servusdei2018/shards"
-
-	"github.com/caarlos0/env"
+	"github.com/servusdei2018/shards/v2"
 )
 
 type config struct {
-	Token string `env:"BOT_TOKEN,required,notEmpty"`
+	Token string
 }
 
 var (
@@ -28,12 +27,20 @@ var (
 )
 
 func init() {
-
-	cfg := config{}
-	if err := env.Parse(&cfg); err != nil {
-		fmt.Printf("%+v\n", err)
+	// Load environment variables from .env file
+	err := godotenv.Load()
+	if err != nil {
+		fmt.Printf("Error loading .env file: %v\n", err)
 	}
 
+	// Get the BOT_TOKEN from the environment
+	cfg = config{
+		Token: os.Getenv("DISCORD_TOKEN"),
+	}
+
+	if cfg.Token == "" {
+		fmt.Println("DISCORD_TOKEN is required but not set in the environment")
+	}
 }
 
 
@@ -61,46 +68,14 @@ func main() {
 	embedHandler := embedMiddleware(r)
 	corsHandler := enableCORS(embedHandler)
 
+	runBotRoutine()
+
 	// Start the server
 	fmt.Println("Starting server on :8080")
-	log.Fatal(http.ListenAndServe(":8080", corsHandler))
-
-		// Create a new Discord session using the provided bot token.
-		Mgr, err := shards.New("Bot " + cfg.Token)
-		if err != nil {
-			fmt.Println("[ERROR] Error creating manager,", err)
-			return
-		}
-	
-		// Register the messageCreate func as a callback for MessageCreate events.
-		Mgr.AddHandler(messageCreate)
-		// Register the onConnect func as a callback for Connect events.
-		Mgr.AddHandler(onConnect)
-	
-		// In this example, we only care about receiving message events.
-		Mgr.RegisterIntent(discordgo.IntentsGuildMessages)
-	
-		fmt.Println("[INFO] Starting shard manager...")
-	
-		// Open a websocket connection to Discord and begin listening.
-		err = Mgr.Start()
-		if err != nil {
-			fmt.Println("[ERROR] Error starting manager,", err)
-			return
-		}
-	
-		// Wait here until CTRL-C or other term signal is received.
-		fmt.Println("[SUCCESS] Bot is now running.  Press CTRL-C to exit.")
-		sc := make(chan os.Signal, 1)
-		signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
-		<-sc
-	
-		// Cleanly close down the Discord session.
-		fmt.Println("[INFO] Stopping shard manager...")
-	
-		Mgr.Shutdown()
-	
-		fmt.Println("[SUCCESS] Shard manager stopped. Bot is shut down.")
+	err := http.ListenAndServe(":8080", corsHandler)
+	if err != nil {
+		logrus.Error("Error starting server:", err)
+	}
 }
 
 
@@ -167,9 +142,6 @@ func onConnect(s *discordgo.Session, evt *discordgo.Connect) {
 	fmt.Printf("[INFO] Shard #%v connected.\n", s.ShardID)
 }
 
-// This function will be called (due to AddHandler above) every time a
-// new  message is created on any channel that the authenticated bot has
-// access to.
 func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// Ignore all messages created by the bot itself.
 	// This isn't required in this specific example but it's a good
@@ -177,6 +149,7 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author.ID == s.State.User.ID {
 		return
 	}
+	logrus.Debug(m.Content)
 	// If the message is "ping" reply with "Pong!"
 	if m.Content == "ping" {
 		s.ChannelMessageSend(m.ChannelID, "Pong!")
@@ -190,13 +163,58 @@ func messageCreate(s *discordgo.Session, m *discordgo.MessageCreate) {
 	// If the message is "restart" restart the shard manager and rescale
 	// if necessary, all with zero down-time.
 	if m.Content == "restart" {
+		var err error
 		s.ChannelMessageSend(m.ChannelID, "[INFO] Restarting shard manager...")
 		fmt.Println("[INFO] Restarting shard manager...")
-		if err := Mgr.Restart(); err != nil {
+		Mgr, err = Mgr.Restart()
+		if err != nil {
 			fmt.Println("[ERROR] Error restarting manager,", err)
 		} else {
 			s.ChannelMessageSend(m.ChannelID, "[SUCCESS] Manager successfully restarted.")
 			fmt.Println("[SUCCESS] Manager successfully restarted.")
 		}
 	}
+}
+
+func runBotRoutine() {
+	go func() {
+		logrus.Debug("Launching Bot now...")
+		
+		// Create a new Discord session using the provided bot token.
+		Mgr, err := shards.New("Bot " + cfg.Token)
+		if err != nil {
+			fmt.Println("[ERROR] Error creating manager,", err)
+			return
+		}
+		
+		logrus.Debug("Bot Launched...")
+		
+		// Register the messageCreate func as a callback for MessageCreate events.
+		Mgr.AddHandler(messageCreate)
+		// Register the onConnect func as a callback for Connect events.
+		Mgr.AddHandler(onConnect)
+		
+		// In this example, we only care about receiving message events.
+		Mgr.RegisterIntent(discordgo.IntentsGuildMessages)
+		
+		fmt.Println("[INFO] Starting shard manager...")
+		
+		// Open a websocket connection to Discord and begin listening.
+		err = Mgr.Start()
+		if err != nil {
+			fmt.Println("[ERROR] Error starting manager,", err)
+			return
+		}
+		
+		// Wait here until CTRL-C or other term signal is received.
+		fmt.Println("[SUCCESS] Bot is now running. Press CTRL-C to exit.")
+		sc := make(chan os.Signal, 1)
+		signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt, os.Kill)
+		<-sc
+		
+		// Cleanly close down the Discord session.
+		fmt.Println("[INFO] Stopping shard manager...")
+		Mgr.Shutdown()
+		fmt.Println("[SUCCESS] Shard manager stopped. Bot is shut down.")
+	}()
 }
